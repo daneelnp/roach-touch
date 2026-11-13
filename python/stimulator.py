@@ -6,6 +6,7 @@ FakeStimulator  a pretend board with the same commands, for practice and tests.
 Both have the same methods: connect, go_to_rest, press, abort, close.
 press() returns a dict: {"status": "done" | "aborted" | "err", ...}.
 """
+import os
 import threading
 import time
 
@@ -57,9 +58,16 @@ class Stimulator:
             "Upload arduino/stimulator/stimulator.ino first.\n"
             f"(It said: {' | '.join(heard) or 'nothing'})")
 
+    def present(self):
+        """Is the USB port still there? (Only looks; sends nothing.)"""
+        return os.path.exists(self.port)
+
     def close(self):
         if self.ser:
-            self.ser.close()
+            try:
+                self.ser.close()
+            except Exception:
+                pass                       # already gone (unplugged)
             self.ser = None
 
     def _send(self, line):
@@ -93,6 +101,8 @@ class Stimulator:
         self.pressing = True
         try:
             return self._press(trial, spine_code, rest_us, amount_us, push_ms, hold_ms, return_ms)
+        except Exception as e:             # unplugged mid-press: log it, don't crash
+            return {"status": "err", "message": f"lost connection to the Arduino ({e})"}
         finally:
             self.pressing = False
 
@@ -119,7 +129,10 @@ class Stimulator:
     def abort(self):
         """Only signal the board if a press is actually running."""
         if self.ser and self.pressing:
-            self._send("X")
+            try:
+                self._send("X")
+            except Exception:
+                pass                       # unplugged: nothing to tell
 
 
 class FakeStimulator:
@@ -134,6 +147,9 @@ class FakeStimulator:
 
     def connect(self):
         time.sleep(0.2 / self.speedup)
+
+    def present(self):
+        return True
 
     def close(self):
         pass

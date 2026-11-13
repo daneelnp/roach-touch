@@ -24,6 +24,7 @@ from stimulator import LEAD_S, FakeStimulator, Stimulator, find_port
 HERE = Path(__file__).parent
 SPINES_CSV = HERE / "spines.csv"
 DATA_ROOT = Path("~/Documents/NeuroProjects/roach-touch-data").expanduser()
+DEFAULT_PORT = "/dev/cu.usbmodem1201"     # the Uno on this laptop (2026-11-13)
 
 
 def schedules_dir():
@@ -142,7 +143,7 @@ class App:
         ttk.Button(g, text="Open", command=self.on_open_session).grid(row=0, column=2, **pad)
 
         ttk.Label(g, text="Port").grid(row=1, column=0, **pad)
-        self.port = tk.StringVar(value=find_port() or "")
+        self.port = tk.StringVar(value=find_port() or DEFAULT_PORT)
         ttk.Entry(g, textvariable=self.port, width=24).grid(row=1, column=1, **pad)
         self.connect_btn = ttk.Button(g, text="Connect", command=self.on_connect)
         self.connect_btn.grid(row=1, column=2, **pad)
@@ -317,7 +318,7 @@ class App:
         if session and self.session is None:
             messagebox.showwarning("Not ready", "Open a session first (Setup tab).")
             return False
-        if connected and self.runner is None:
+        if connected and self.stim is None:
             messagebox.showwarning("Not ready", "Connect first (Setup tab).")
             return False
         return True
@@ -406,7 +407,7 @@ class App:
                 messagebox.showwarning("Busy", "Wait for the current action to finish.")
                 return
             self.stim.close()
-            self.stim = self.runner = None
+            self.stim = None                   # the runner (and any schedule) is kept
             self.connect_btn.config(text="Connect")
             self.conn_label.config(text="● not connected", foreground="gray")
             self._say("disconnected")
@@ -418,8 +419,15 @@ class App:
         except Exception as e:
             messagebox.showerror("Connect", str(e))
             return
+        if self.runner and self.runner.busy:
+            stim.close()
+            messagebox.showwarning("Busy", "Wait a moment for the last action to stop, then connect again.")
+            return
         self.stim = stim
-        self.runner = Runner(stim, self.session, self.spines, self._from_runner)
+        if self.runner:                        # reconnect: keep the schedule and your place in it
+            self.runner.stim = stim
+        else:
+            self.runner = Runner(stim, self.session, self.spines, self._from_runner)
         self.connect_btn.config(text="Disconnect")
         self.conn_label.config(text="● simulated" if sim else "● connected",
                                foreground="#a05a00" if sim else "green")
@@ -570,7 +578,23 @@ class App:
             elif kind == "idle":
                 self._refresh_go()
         self._tick()
+        self.polls = getattr(self, "polls", 0) + 1
+        if self.polls % 10 == 0 and self.stim and not self.stim.present():
+            self._lost_connection()
         self.root.after(100, self._poll)
+
+    def _lost_connection(self):
+        """The USB port vanished (unplugged). Stop everything, keep the schedule."""
+        stim, self.stim = self.stim, None
+        if self.runner:
+            self.runner.abort()
+        stim.close()
+        self.connect_btn.config(text="Connect")
+        self.conn_label.config(text="● disconnected", foreground=PHASE_COLORS["bad"])
+        self.phase = None
+        self._show_phase("DISCONNECTED", "Arduino unplugged", "bad")
+        self._say("disconnected: Arduino unplugged")
+        self._refresh_go()
 
 
 
