@@ -14,6 +14,8 @@ import csv
 import itertools
 import random
 
+from stimulator import time_problems
+
 FIELDS = ["block", "spine_name", "rest_us", "amount_us",
           "push_ms", "hold_ms", "return_ms", "gap_s"]
 INT_FIELDS = ["rest_us", "amount_us", "push_ms", "hold_ms", "return_ms"]
@@ -156,5 +158,8 @@ def load_schedule(path, spines):
                 row["gap_s"] = float(row["gap_s"])
             except ValueError:
                 raise ValueError(f"line {i}: a number is not a number") from None
+            errors, _ = time_problems(row)
+            if errors:
+                raise ValueError(f"line {i}: {errors[0]}")
             rows.append(row)
     return add_visits(rows)

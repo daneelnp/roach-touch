@@ -19,7 +19,7 @@ from runner import TEST_SPINE, Runner
 from schedule import (MAX_TOUCHES, VARIED, add_references, add_visits, build_schedule,
                       count_touches, load_schedule, load_spines, save_schedule, touch_seconds)
 from session import Session
-from stimulator import LEAD_S, FakeStimulator, Stimulator, find_port
+from stimulator import LEAD_S, FakeStimulator, Stimulator, find_port, time_problems
 
 HERE = Path(__file__).parent
 SPINES_CSV = HERE / "spines.csv"
@@ -194,7 +194,23 @@ class App:
         ttk.Checkbutton(row, text="wait for rest", variable=self.single_wait).pack(side="left", padx=8)
         self.send_btn = ColorButton(row, "SEND SINGLE TOUCH", "green", self.on_single_touch, width=20)
         self.send_btn.pack(side="right")
+        self.single_warn = ttk.Label(tab, text="", justify="left")
+        self.single_warn.pack(anchor="w", padx=8, pady=(6, 0))
+        for v in self.single_settings.values():
+            v.trace_add("write", lambda *_: self._check_single())
         self._phase_panel(tab)
+
+    def _check_single(self):
+        """Live red/orange note under the Single touch fields."""
+        try:
+            errors, warnings = time_problems({k: int(self.single_settings[k].get())
+                                              for k in ("push_ms", "hold_ms", "return_ms")})
+        except ValueError:
+            errors, warnings = [], []
+        if errors:
+            self.single_warn.config(text="\n".join(errors), foreground=PHASE_COLORS["bad"])
+        else:
+            self.single_warn.config(text="\n".join(warnings), foreground=PHASE_COLORS["wait"])
 
     def _build_schedule(self, tab):
         btns = ttk.Frame(tab)
@@ -454,6 +470,9 @@ class App:
         if not self._need():
             return
         s = self._read_settings(self.single_settings)
+        if s and time_problems(s)[0]:
+            messagebox.showerror("Settings", "\n".join(time_problems(s)[0]))
+            return
         if s:
             self._try(lambda: self.runner.single_touch(s, self.single_spine.get(), self.single_wait.get()))
 
@@ -463,7 +482,13 @@ class App:
             ScheduleLoader(self)
 
     def load_schedule_file(self, path):
-        self._try(lambda: self._use_schedule(load_schedule(path, self.spines), Path(path).stem))
+        def load():
+            rows = load_schedule(path, self.spines)
+            self._use_schedule(rows, Path(path).stem)
+            _, warnings = time_problems({k: [r[k] for r in rows] for k in ("push_ms", "hold_ms", "return_ms")})
+            for w in warnings:
+                self._say(f"warning: {w}")
+        self._try(load)
 
     def on_create_schedule(self):
         if not self._need() or self._builder_open():
@@ -688,7 +713,9 @@ class ScheduleBuilder:
 
         # ---- summary + buttons
         self.summary = ttk.Label(f, text="", font=("Helvetica", 13), justify="left")
-        self.summary.grid(row=self._row(), column=0, columnspan=4, sticky="w", pady=(14, 6))
+        self.summary.grid(row=self._row(), column=0, columnspan=4, sticky="w", pady=(14, 2))
+        self.warn = ttk.Label(f, text="", foreground=PHASE_COLORS["wait"], justify="left")
+        self.warn.grid(row=self._row(), column=0, columnspan=4, sticky="w", pady=(0, 6))
         bb = ttk.Frame(f)
         bb.grid(row=self._row(), column=0, columnspan=4, sticky="e")
         ttk.Button(bb, text="Cancel", command=self.win.destroy).pack(side="left", padx=6)
@@ -749,6 +776,9 @@ class ScheduleBuilder:
                 return None, f"{names[key]}: not a number."
         if min(values["gap_s"]) < LEAD_S:
             return None, f"rest before push must be at least {LEAD_S:.0f} s."
+        errors, warnings = time_problems(values)
+        if errors:
+            return None, errors[0] + "."
         try:
             per, rounds = int(self.g("per_visit")), int(self.g("rounds"))
             rest_us = int(self.app.rest_us.get())
@@ -772,6 +802,10 @@ class ScheduleBuilder:
                 return None, f"Reference hit: rest before push must be at least {LEAD_S:.0f} s."
             if every <= 0 or count < 1:
                 return None, "Reference hit: 'every' and 'touches each time' must be above 0."
+            ref_errors, ref_warnings = time_problems(settings)
+            if ref_errors:
+                return None, f"Reference hit: {ref_errors[0]}."
+            warnings += [f"reference hit: {w}" for w in ref_warnings]
             ref = dict(spine=self.g("ref_spine"), settings={**settings, "rest_us": rest_us},
                        every=every, unit=self.g("ref_unit"), count=count)
 
@@ -786,7 +820,7 @@ class ScheduleBuilder:
         build = dict(spine_names=spines, values=values, rest_us=rest_us, mode=mode, per_visit=per,
                      rounds=rounds, shuffle_spines=self.g("shuffle_spines"),
                      shuffle_within=self.g("shuffle_within"), block=block)
-        return dict(build=build, ref=ref, name=name), None
+        return dict(build=build, ref=ref, name=name, warnings=warnings), None
 
     @staticmethod
     def make(kw, seed):
@@ -802,6 +836,7 @@ class ScheduleBuilder:
         for w in self.ref_widgets:
             w.state(["!disabled"] if self.g("ref_on") else ["disabled"])
         kw, err = self.read()
+        self.warn.config(text="" if err else "\n".join(kw["warnings"]))
         if err:
             self.summary.config(text=err, foreground=PHASE_COLORS["bad"])
             self.create_btn.state(["disabled"])

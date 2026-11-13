@@ -17,6 +17,27 @@ BAUD = 115200
 FIRMWARE_ID = "ready,roach-touch-stimulator,1"   # what stimulator.ino says on start-up
 LEAD_S = 3.0          # must match LEAD_MS in stimulator.ino
 MIN_US, MAX_US = 600, 2400   # must match the limits in stimulator.ino
+TIME_LIMITS = {"push_ms": 10000, "hold_ms": 60000, "return_ms": 10000}   # must match MAX_*_MS in stimulator.ino
+SMOOTH_MIN_MS = 50    # faster pushes/returns: the servo can't follow exactly (warning only)
+TIME_NAMES = {"push_ms": "push time", "hold_ms": "hold", "return_ms": "return time"}
+
+
+def time_problems(settings):
+    """settings: {push_ms, hold_ms, return_ms: a number or a list of numbers}.
+    Returns (errors, warnings). Errors = the Arduino would refuse the touch.
+    Warnings = under SMOOTH_MIN_MS for push/return time: allowed, but the servo
+    only updates every 20 ms, so the real motion won't match what was asked."""
+    errors, warnings = [], []
+    for key, top in TIME_LIMITS.items():
+        vals = settings.get(key, [])
+        vals = vals if isinstance(vals, list) else [vals]
+        if any(not 0 <= v <= top for v in vals):
+            errors.append(f"{TIME_NAMES[key]} must be 0-{top} ms")
+        fast = [v for v in vals if 0 <= v < SMOOTH_MIN_MS]
+        if key != "hold_ms" and fast:
+            warnings.append(f"{TIME_NAMES[key]} under {SMOOTH_MIN_MS} ms "
+                            f"({', '.join(map(str, sorted(set(fast))))}): the servo can't follow this exactly")
+    return errors, warnings
 
 
 def find_port():
