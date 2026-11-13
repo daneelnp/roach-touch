@@ -11,6 +11,7 @@ Consecutive rows at the same spine form one "visit"; the app runs a visit on
 its own and stops for you when the spine changes.
 """
 import csv
+import itertools
 import random
 
 FIELDS = ["block", "spine_name", "rest_us", "amount_us",
@@ -32,40 +33,57 @@ def load_spines(path):
     return spines
 
 
-def _row(block, spine, settings):
-    return {"block": block, "spine_name": spine,
-            "rest_us": settings["rest_us"], "amount_us": settings["amount_us"],
-            "push_ms": settings["push_ms"], "hold_ms": settings["hold_ms"],
-            "return_ms": settings["return_ms"], "gap_s": settings["gap_s"]}
+VARIED = ["amount_us", "push_ms", "hold_ms", "return_ms", "gap_s"]   # settings the builder can vary
+MAX_TOUCHES = 20000
 
 
-def spine_block(spines, touches_per_visit, rounds, settings, seed=None):
-    """Shuffled rounds: every round visits every spine once, in a new random
-    order, with touches_per_visit touches per visit. Two rounds never meet at
-    the same spine (that would silently make one double-length visit)."""
+def count_touches(n_spines, values, mode, per_visit, rounds):
+    """How many touches build_schedule would make (cheap; no list is built)."""
+    combos = 1
+    for k in VARIED:
+        combos *= len(values[k])
+    per = combos * per_visit if mode == "combinations" else per_visit
+    return n_spines * rounds * per
+
+
+def build_schedule(spine_names, values, rest_us, mode="combinations", per_visit=5,
+                   rounds=1, shuffle_spines=True, shuffle_within=True,
+                   block="custom", seed=None):
+    """The general schedule maker.
+
+    values      {setting: [value, ...]} for every setting in VARIED. One value
+                = held constant; several = varied.
+    mode        "combinations": every visit holds every combination of the
+                    values, per_visit times each (balanced).
+                "random": every visit holds per_visit touches, each setting
+                    picked at random from its values (unbalanced).
+    rounds      how many times each spine is visited.
+    shuffle_spines   new random spine order every round (a round never starts
+                     at the spine the last one ended on: that would silently
+                     merge two visits). Off = the order given, every round.
+    shuffle_within   (combinations only) random order inside a visit. Off =
+                     the combinations in order, repeated per_visit times.
+    """
     rng = random.Random(seed)
+    combos = [dict(zip(VARIED, c)) for c in itertools.product(*(values[k] for k in VARIED))]
     rows, last = [], None
     for _ in range(rounds):
-        order = list(spines)
-        rng.shuffle(order)
-        while len(order) > 1 and order[0] == last:
+        order = list(spine_names)
+        if shuffle_spines:
             rng.shuffle(order)
+            while len(order) > 1 and order[0] == last:
+                rng.shuffle(order)
         for spine in order:
-            rows += [_row("spine", spine, settings) for _ in range(touches_per_visit)]
+            if mode == "combinations":
+                visit = combos * per_visit
+                if shuffle_within:
+                    rng.shuffle(visit)
+            elif mode == "random":
+                visit = [{k: rng.choice(values[k]) for k in VARIED} for _ in range(per_visit)]
+            else:
+                raise ValueError(f"unknown mode {mode!r}")
+            rows += [{"block": block, "spine_name": spine, "rest_us": rest_us, **c} for c in visit]
         last = order[-1]
-    return rows
-
-
-def velocity_block(spine, push_ms_values, repeats, settings, seed=None):
-    """One spine, each push duration repeated `repeats` times, fully shuffled."""
-    rng = random.Random(seed)
-    rows = []
-    for push_ms in push_ms_values:
-        for _ in range(repeats):
-            row = _row("velocity", spine, settings)
-            row["push_ms"] = int(push_ms)
-            rows.append(row)
-    rng.shuffle(rows)
     return rows
 
 

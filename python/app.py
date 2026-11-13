@@ -3,7 +3,8 @@
 Run:  python3 python/app.py   (or double-click roach-touch.command on the Desktop)
 Setup tab: open a session, connect (tick Simulate to practise with no Arduino),
 go to rest. Then use the Single touch or Schedule tab.
-Enter = the green button of the open tab (ignored while typing in a field).
+Enter = the green button of the open tab. In the Single touch fields Enter
+sends the touch; in other fields it does nothing.
 Esc = ABORT.
 """
 import queue
@@ -15,8 +16,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from runner import TEST_SPINE, Runner
-from schedule import (load_schedule, load_spines, save_schedule, spine_block,
-                      velocity_block)
+from schedule import (MAX_TOUCHES, VARIED, add_visits, build_schedule, count_touches,
+                      load_schedule, load_spines, save_schedule)
 from session import Session
 from stimulator import LEAD_S, FakeStimulator, Stimulator, find_port
 
@@ -188,16 +189,10 @@ class App:
         self._phase_panel(tab)
 
     def _build_schedule(self, tab):
-        ttk.Label(tab, text="New schedule settings", foreground="gray").pack(anchor="w", padx=8)
-        grid = ttk.Frame(tab)
-        grid.pack(fill="x", pady=(2, 10))
-        self.sched_settings = self._touch_fields(grid)
-
         btns = ttk.Frame(tab)
         btns.pack(fill="x", padx=8)
-        ttk.Button(btns, text="Load file…", command=self.on_load_schedule).pack(side="left")
-        ttk.Button(btns, text="Random spine block…", command=self.on_random_spine).pack(side="left", padx=6)
-        ttk.Button(btns, text="Random velocity block…", command=self.on_random_velocity).pack(side="left")
+        ttk.Button(btns, text="Create schedule…", command=self.on_create_schedule).pack(side="left")
+        ttk.Button(btns, text="Load file…", command=self.on_load_schedule).pack(side="left", padx=6)
         self.sched_label = ttk.Label(btns, text="no schedule", foreground="gray")
         self.sched_label.pack(side="left", padx=12)
 
@@ -373,8 +368,11 @@ class App:
 
     # ================================================================ keys
     def on_enter(self, event):
-        """Enter = the green button of the open tab, but never while typing."""
-        if isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox)):
+        """Enter = the green button of the open tab. While typing, Enter only
+        counts in the Single touch fields (it sends the touch); in every other
+        field (setup, schedule settings, flag/note) it does nothing."""
+        typing = isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox))
+        if typing and not str(event.widget).startswith(str(self.single_tab)):
             return
         tab = self.tabs.select()
         if tab == str(self.single_tab):
@@ -455,72 +453,17 @@ class App:
         if path:
             self._try(lambda: self._use_schedule(load_schedule(path, self.spines), Path(path).stem))
 
-    def _ask(self, title, fields):
-        """Small form. fields: [(label, default)]. Returns the answers or None."""
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        win.transient(self.root)
-        frame = ttk.Frame(win, padding=14)
-        frame.pack()
-        vars_, result = [], {}
-        for i, (label, default) in enumerate(fields):
-            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="e", padx=6, pady=4)
-            v = tk.StringVar(value=default)
-            ttk.Entry(frame, textvariable=v, width=40).grid(row=i, column=1, padx=6, pady=4)
-            vars_.append(v)
-
-        def ok():
-            result["values"] = [v.get().strip() for v in vars_]
-            win.destroy()
-
-        ttk.Button(frame, text="Make schedule", command=ok).grid(row=len(fields), column=1, sticky="e", pady=8)
-        win.grab_set()
-        self.root.wait_window(win)
-        return result.get("values")
-
-    def on_random_spine(self):
-        if not self._need():
+    def on_create_schedule(self):
+        if not self._need() or self._builder_open():
             return
-        s = self._read_settings(self.sched_settings)
-        if not s:
-            return
-        ans = self._ask("Random spine block", [
-            ("spines (comma-separated)", ", ".join(self.spines)),
-            ("touches per visit", "5"), ("rounds", "5"), ("seed (blank = random)", "")])
-        if not ans:
-            return
+        ScheduleBuilder(self)
 
-        def make():
-            names = [n.strip() for n in ans[0].split(",") if n.strip()]
-            unknown = [n for n in names if n not in self.spines]
-            if unknown:
-                raise ValueError(f"not in spines.csv: {', '.join(unknown)}")
-            seed = int(ans[3]) if ans[3] else random.randrange(1_000_000)
-            self._use_schedule(spine_block(names, int(ans[1]), int(ans[2]), s, seed=seed),
-                               f"spineblock_seed{seed}")
-        self._try(make)
-
-    def on_random_velocity(self):
-        if not self._need():
-            return
-        s = self._read_settings(self.sched_settings)
-        if not s:
-            return
-        ans = self._ask("Random velocity block", [
-            ("spine", next(iter(self.spines))),
-            ("push times in ms (comma-separated)", "50, 100, 200, 500, 1000"),
-            ("repeats of each", "10"), ("seed (blank = random)", "")])
-        if not ans:
-            return
-
-        def make():
-            if ans[0] not in self.spines:
-                raise ValueError(f"'{ans[0]}' is not in spines.csv")
-            pushes = [int(x) for x in ans[1].split(",") if x.strip()]
-            seed = int(ans[3]) if ans[3] else random.randrange(1_000_000)
-            self._use_schedule(velocity_block(ans[0], pushes, int(ans[2]), s, seed=seed),
-                               f"velocity_seed{seed}")
-        self._try(make)
+    def _builder_open(self):
+        win = getattr(self, "builder_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return True
+        return False
 
     def on_go(self):
         """SPINE MOVED (start of a visit) or CONTINUE (retry after a stop)."""
@@ -624,6 +567,162 @@ class App:
                 self._refresh_go()
         self._tick()
         self.root.after(100, self._poll)
+
+
+
+class ScheduleBuilder:
+    """The Create schedule pop-up. Remembers what you typed until the app closes."""
+    memory = None
+
+    def __init__(self, app):
+        self.app = app
+        self.win = app.builder_win = tk.Toplevel(app.root)
+        self.win.title("Create schedule")
+        self.win.transient(app.root)
+        f = ttk.Frame(self.win, padding=16)
+        f.pack(fill="both", expand=True)
+        m = ScheduleBuilder.memory or {}
+
+        # spines
+        ttk.Label(f, text="Spines", font=("Helvetica", 13, "bold")).grid(row=0, column=0, sticky="nw", pady=(0, 8))
+        sp = ttk.Frame(f)
+        sp.grid(row=0, column=1, columnspan=3, sticky="w", pady=(0, 8))
+        self.spine_vars = {}
+        for i, name in enumerate(app.spines):
+            v = tk.BooleanVar(value=m.get("spines", {}).get(name, True))
+            ttk.Checkbutton(sp, text=name, variable=v).grid(row=i // 4, column=i % 4, sticky="w", padx=(0, 14))
+            self.spine_vars[name] = v
+
+        # settings: vary checkbox + value(s)
+        ttk.Label(f, text="vary").grid(row=1, column=1, sticky="w")
+        ttk.Label(f, text="value(s), comma-separated when varied").grid(row=1, column=2, sticky="w")
+        self.vary, self.vals = {}, {}
+        labels = {k: (text, default) for k, text, default in TOUCH_FIELDS}
+        for r, key in enumerate(VARIED, start=2):
+            text, default = labels[key]
+            ttk.Label(f, text=text).grid(row=r, column=0, sticky="w", pady=3)
+            self.vary[key] = tk.BooleanVar(value=m.get("vary", {}).get(key, False))
+            ttk.Checkbutton(f, variable=self.vary[key]).grid(row=r, column=1, sticky="w")
+            self.vals[key] = tk.StringVar(value=m.get("vals", {}).get(key, str(default)))
+            ttk.Entry(f, textvariable=self.vals[key], width=28).grid(row=r, column=2, columnspan=2, sticky="w")
+        r = len(VARIED) + 2
+
+        # how to combine
+        ttk.Separator(f).grid(row=r, column=0, columnspan=4, sticky="ew", pady=10)
+        ttk.Label(f, text="Combine").grid(row=r + 1, column=0, sticky="w")
+        self.mode = tk.StringVar(value=m.get("mode", "combinations"))
+        ttk.Radiobutton(f, text="every combination", value="combinations",
+                        variable=self.mode).grid(row=r + 1, column=1, columnspan=2, sticky="w")
+        ttk.Radiobutton(f, text="random each touch", value="random",
+                        variable=self.mode).grid(row=r + 1, column=3, sticky="w")
+
+        self.per_label = ttk.Label(f)
+        self.per_label.grid(row=r + 2, column=0, columnspan=2, sticky="w", pady=3)
+        self.per_visit = tk.StringVar(value=m.get("per_visit", "5"))
+        ttk.Entry(f, textvariable=self.per_visit, width=6).grid(row=r + 2, column=2, sticky="w")
+        ttk.Label(f, text="rounds (visits per spine)").grid(row=r + 3, column=0, columnspan=2, sticky="w", pady=3)
+        self.rounds = tk.StringVar(value=m.get("rounds", "4"))
+        ttk.Entry(f, textvariable=self.rounds, width=6).grid(row=r + 3, column=2, sticky="w")
+
+        self.shuffle_spines = tk.BooleanVar(value=m.get("shuffle_spines", True))
+        ttk.Checkbutton(f, text="shuffle spine order each round",
+                        variable=self.shuffle_spines).grid(row=r + 4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        self.shuffle_within = tk.BooleanVar(value=m.get("shuffle_within", True))
+        self.within_box = ttk.Checkbutton(f, text="shuffle touches within a visit", variable=self.shuffle_within)
+        self.within_box.grid(row=r + 5, column=0, columnspan=4, sticky="w")
+
+        ttk.Label(f, text="block name").grid(row=r + 6, column=0, sticky="w", pady=(8, 0))
+        self.block = tk.StringVar(value=m.get("block", "custom"))
+        ttk.Entry(f, textvariable=self.block, width=16).grid(row=r + 6, column=2, sticky="w", pady=(8, 0))
+
+        # live summary + buttons
+        self.summary = ttk.Label(f, text="", font=("Helvetica", 13), justify="left")
+        self.summary.grid(row=r + 7, column=0, columnspan=4, sticky="w", pady=(14, 6))
+        bb = ttk.Frame(f)
+        bb.grid(row=r + 8, column=0, columnspan=4, sticky="e")
+        ttk.Button(bb, text="Cancel", command=self.win.destroy).pack(side="left", padx=6)
+        self.create_btn = ttk.Button(bb, text="Create", command=self.create)
+        self.create_btn.pack(side="left")
+
+        all_vars = [*self.spine_vars.values(), *self.vary.values(), *self.vals.values(), self.mode,
+                    self.per_visit, self.rounds, self.shuffle_spines, self.shuffle_within, self.block]
+        for v in all_vars:
+            v.trace_add("write", lambda *_: self.update())
+        self.update()
+
+    # ---- reading the form
+    def read(self):
+        """-> (kwargs for build_schedule, None) or (None, error text)."""
+        spines = [n for n, v in self.spine_vars.items() if v.get()]
+        if not spines:
+            return None, "Pick at least one spine."
+        values = {}
+        for key in VARIED:
+            text = self.vals[key].get()
+            parts = [p.strip() for p in text.split(",") if p.strip()]
+            name = dict((k, t) for k, t, _ in TOUCH_FIELDS)[key]
+            if not parts:
+                return None, f"{name}: empty."
+            if len(parts) > 1 and not self.vary[key].get():
+                return None, f"{name}: several values, but 'vary' is not ticked."
+            try:
+                values[key] = [float(p) if key == "gap_s" else int(p) for p in parts]
+            except ValueError:
+                return None, f"{name}: not a number."
+        if min(values["gap_s"]) < LEAD_S:
+            return None, f"rest before push must be at least {LEAD_S:.0f} s."
+        try:
+            per, rounds = int(self.per_visit.get()), int(self.rounds.get())
+            rest_us = int(self.app.rest_us.get())
+        except ValueError:
+            return None, "Touches per visit, rounds and the rest position must be whole numbers."
+        if per < 1 or rounds < 1:
+            return None, "Touches per visit and rounds must be at least 1."
+        block = self.block.get().strip() or "custom"
+        if "," in block:
+            return None, "Block name can't contain a comma."
+        mode = self.mode.get()
+        if count_touches(len(spines), values, mode, per, rounds) > MAX_TOUCHES:
+            return None, f"More than {MAX_TOUCHES} touches."
+        return dict(spine_names=spines, values=values, rest_us=rest_us, mode=mode,
+                    per_visit=per, rounds=rounds, shuffle_spines=self.shuffle_spines.get(),
+                    shuffle_within=self.shuffle_within.get(), block=block), None
+
+    def update(self):
+        combos = self.mode.get() == "combinations"
+        self.per_label.config(text="repeats of each combination per visit" if combos else "touches per visit")
+        self.within_box.state(["!disabled"] if combos else ["disabled"])
+        kw, err = self.read()
+        if err:
+            self.summary.config(text=err, foreground=PHASE_COLORS["bad"])
+            self.create_btn.state(["disabled"])
+            return
+        rows = add_visits(build_schedule(**kw, seed=0))
+        n_combos = len(rows) // (len(kw["spine_names"]) * kw["rounds"] * kw["per_visit"]) if combos else None
+        minutes = sum(r["gap_s"] + (r["push_ms"] + r["hold_ms"] + r["return_ms"]) / 1000 for r in rows) / 60
+        visits = rows[-1]["visit"]
+        line1 = (f"{len(kw['spine_names'])} spines × {n_combos} combinations × "
+                 f"{kw['per_visit'] * kw['rounds']} repeats = {len(rows)} touches" if combos else
+                 f"{len(kw['spine_names'])} spines × {kw['rounds']} rounds × {kw['per_visit']} = {len(rows)} touches")
+        self.summary.config(text=f"{line1}\n{visits} visits · about {minutes:.0f} min + {visits} moves",
+                            foreground="")
+        self.create_btn.state(["!disabled"])
+
+    def create(self):
+        kw, err = self.read()
+        if err:
+            return
+        ScheduleBuilder.memory = {
+            "spines": {n: v.get() for n, v in self.spine_vars.items()},
+            "vary": {k: v.get() for k, v in self.vary.items()},
+            "vals": {k: v.get() for k, v in self.vals.items()},
+            "mode": self.mode.get(), "per_visit": self.per_visit.get(), "rounds": self.rounds.get(),
+            "shuffle_spines": self.shuffle_spines.get(), "shuffle_within": self.shuffle_within.get(),
+            "block": self.block.get()}
+        seed = random.randrange(1_000_000)
+        rows = build_schedule(**kw, seed=seed)
+        self.win.destroy()
+        self.app._try(lambda: self.app._use_schedule(rows, f"{kw['block']}_seed{seed}"))
 
 
 if __name__ == "__main__":
