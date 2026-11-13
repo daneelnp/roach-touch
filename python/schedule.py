@@ -87,6 +87,39 @@ def build_schedule(spine_names, values, rest_us, mode="combinations", per_visit=
     return rows
 
 
+def touch_seconds(row):
+    """Rough length of one touch: rest before it + push + hold + return."""
+    return row["gap_s"] + (row["push_ms"] + row["hold_ms"] + row["return_ms"]) / 1000
+
+
+def add_references(rows, spine, settings, every, unit="touches", count=3):
+    """Insert reference hits: `count` identical touches at one fixed `spine`.
+
+    They go at the start, at the end, and between two visits whenever at
+    least `every` touches (unit="touches") or `every` minutes (unit="minutes",
+    estimated from the schedule, not counting your moves) have passed since
+    the last reference. Never inside a visit. settings: amount_us, push_ms,
+    hold_ms, return_ms, gap_s, rest_us. Logged with block "reference"."""
+    def ref_group():
+        return [{"block": "reference", "spine_name": spine, **settings} for _ in range(count)]
+
+    visits = []                                   # split into runs of the same spine
+    for row in rows:
+        if visits and visits[-1][-1]["spine_name"] == row["spine_name"]:
+            visits[-1].append(row)
+        else:
+            visits.append([row])
+
+    out, since = ref_group(), 0.0
+    for i, visit in enumerate(visits):
+        out += visit
+        since += len(visit) if unit == "touches" else sum(map(touch_seconds, visit)) / 60
+        if since >= every and i < len(visits) - 1:
+            out += ref_group()
+            since = 0.0
+    return out + ref_group()
+
+
 def add_visits(rows):
     """Number the visits (runs of the same spine) and the touches within them."""
     visit, prev = 0, None
