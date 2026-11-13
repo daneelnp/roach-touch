@@ -246,7 +246,7 @@ void setup() {
     servo.attach(SERVO_PIN);
     attached = true;
   }
-  Serial.println("ready");
+  Serial.println("ready,roach-touch-stimulator,1");   // the app checks this name
 }
 
 void loop() {
