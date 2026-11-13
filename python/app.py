@@ -3,8 +3,7 @@
 Run:  python3 python/app.py   (or double-click roach-touch.command on the Desktop)
 Setup tab: open a session, connect (tick Simulate to practise with no Arduino),
 go to rest. Then use the Single touch or Schedule tab.
-Enter = the green button of the open tab. In the Single touch fields Enter
-sends the touch; in other fields it does nothing.
+Enter = the green button of the open tab (ignored while typing in a field).
 Esc = ABORT.
 """
 import queue
@@ -368,11 +367,8 @@ class App:
 
     # ================================================================ keys
     def on_enter(self, event):
-        """Enter = the green button of the open tab. While typing, Enter only
-        counts in the Single touch fields (it sends the touch); in every other
-        field (setup, schedule settings, flag/note) it does nothing."""
-        typing = isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox))
-        if typing and not str(event.widget).startswith(str(self.single_tab)):
+        """Enter = the green button of the open tab, but never while typing."""
+        if isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox)):
             return
         tab = self.tabs.select()
         if tab == str(self.single_tab):
